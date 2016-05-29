@@ -1,11 +1,22 @@
 #include <iostream>
 #include <fstream>
+#include <boost/config.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
+#include <boost/graph/adjacency_list.hpp>
+#include <boost/graph/one_bit_color_map.hpp>
+#include <boost/graph/stoer_wagner_min_cut.hpp>
+#include <boost/property_map/property_map.hpp>
+#include <boost/typeof/typeof.hpp>
+#include <boost/graph/boykov_kolmogorov_max_flow.hpp>
+#include <boost/graph/read_dimacs.hpp>
+#include <boost/graph/graph_utility.hpp>
+#include <boost/graph/graphviz.hpp>
 #include <map>
 #include <cmath>
 #include <cfloat>
+#include <random>
 
 /*
     Algorithm plane segmentation
@@ -39,8 +50,46 @@ T cross_prod(T& a, T&b)
     res[2] = a[0]*b[1] - a[1]*b[0];
     return res;
 }
+template <typename T>
+void normalize(T& v)
+{
+    float s = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+    v[0] = v[0]/s;
+    v[1] = v[1]/s;
+    v[2] = v[2]/s;
+
+}
+
+template <typename T>
+bool match(T& a, T& b)
+{
+    float dot = a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+    //std::cout << dot<<std::endl;
+    if (dot >= 0.99999f)
+        return true;
+    return false;
+    //return (a[0] != b[0] || a[1] != b[1] || a[2] != b[2] );
+}
+
+struct Node{
+    int i;
+    int j;
+};
+
+// undirected edge between a and b with weight w
+struct Weight{
+    float w;
+};
+
+
 
 class ImageSeg{
+    typedef boost::adjacency_list<boost::vecS,boost::vecS, boost::directedS, Node, Weight> Graph;
+    //typedef boost::adjacency_list_traits < boost::vecS, boost::vecS, boost::directedS, Node, Weight > Traits;
+    //typedef boost::property_map<Graph, boost::edge_weight_t>::type weight_map_type;
+    //typedef boost::property_traits<weight_map_type>::value_type weight_type;
+    typedef boost::graph_traits<Graph>::vertex_descriptor Vertex;
+	typedef boost::graph_traits<Graph>::edge_descriptor Edge;
 public:
     ImageSeg(){}
 
@@ -65,6 +114,11 @@ public:
     /* @brief: calculate normal for the window */
     void findNormals();
 
+    void minCutSegmentation();
+
+    void addVertex(Graph& g, int i, int j );
+
+    void addEdge(Graph& g,Vertex& v1, Vertex& v2, float w);
 
 
 
@@ -74,15 +128,18 @@ private:
     int _rows;  // both should be of same size
     int _cols;  //both should be of same size
     std::map<cv::Point3f,cv::Vec3f > _point_normals;
+    Graph _g;
 };
 
 void ImageSeg::filterDepth(cv::Mat& depth)
 {
     cv::Mat filtered_depth;
     filtered_depth.setTo(std::numeric_limits<float>::quiet_NaN(), depth == 0);
-    depth.convertTo(filtered_depth, CV_32FC1, 1.f/5000.f);
 
-    filtered_depth.copyTo(depth);
+    depth.convertTo(filtered_depth, CV_32FC1, 1.f/5000.f);
+    // filter depth image for better estimate
+    cv::bilateralFilter(filtered_depth, depth, -1, 0.03, 4.5);
+    //filtered_depth.copyTo(depth);
 }
 
 /* reads image from file */
@@ -136,6 +193,10 @@ void ImageSeg::findNormals()
     2. create cross product for those axis
     */
     //cv::Mat depth = _depth_im;
+    cv::Mat_<cv::Vec3f> normal_image(_cols,_rows, CV_16UC1);
+    cv::Mat plane = cv::Mat::zeros(_rows,_cols, CV_16UC1);
+    std::vector<cv::Vec3f> normal_clustor;
+    std::vector<std::vector<std::pair<int, int> > > pixel_bins;
     for(int i = 1; i < _cols;i++)
     {
         for(int j = 1;j<_rows;j++)
@@ -148,12 +209,13 @@ void ImageSeg::findNormals()
                 float d3 = _depth_im.at<float>(i, j+1);
                 float d4 = _depth_im.at<float>(i-1,j);
                 float d2 = _depth_im.at<float>(i+1,j);
+
                 if(!is_nan(d1) && !is_nan(d2) && !is_nan(d3) && !is_nan(d4))
                 {
                     //std::cout << d1<< ", "<<d2<<", "<<d3<<", "<<d4 << std::endl;
                     if (abs(d1-d3) < 0.01 &&  abs(d2-d4) < 0.01)
                     {
-                        std::cout << d1<< ", "<<d2<<", "<<d3<<", "<<d4 << std::endl;
+                        //std::cout << d1<< ", "<<d2<<", "<<d3<<", "<<d4 << std::endl;
                         cv::Vec3f a; // d1-d3
                         a[0] = i -i;
                         a[1] = (j-1) - (j+1);
@@ -163,9 +225,49 @@ void ImageSeg::findNormals()
                         b[1] = j - j;
                         b[2] = d2-d3;
                         cv::Vec3f normal = cross_prod(b,a); // normal towards camera
-                        cv::norm(normal); // normalize
-                        cv::Point3f p((float) i,(float) j,d0);
-                        //_point_normals.insert(std::pair<cv::Point3f, cv::Vec3f>(p,normal));
+                        normalize(normal);
+                        //cv::norm(normal); // normalize
+                        //cv::Point3f p((float) i,(float) j,d0);
+                        plane.at<int>(i,j) = (int) (255.0f * normal[2]);
+
+                        if(normal_clustor.empty())
+                        {
+                            normal_clustor.push_back(normal);
+                            std::pair<int, int> curr_pixel(i,j);
+                            std::vector<std::pair<int, int> > curr_bin;
+                            curr_bin.push_back(curr_pixel);
+                            pixel_bins.push_back(curr_bin);
+
+
+
+                        }else{
+                            bool found = false;
+
+                            for(int k = 0; k < normal_clustor.size();k++)
+                            {
+                                if(match(normal, normal_clustor[k]))
+                                {
+                                    //std::cout << "k :"<< k << std::endl;
+                                    found = true;
+                                    std::pair<int,int> curr_pixel(i,j);
+                                    pixel_bins[k].push_back(curr_pixel);
+                                    break;
+                                }
+                            }
+                            if(!found)
+                            {
+                                normal_clustor.push_back(normal);
+                                std::pair<int,int> curr_pixel(i,j);
+                                std::vector<std::pair<int, int> > curr_bin;
+                                curr_bin.push_back(curr_pixel);
+                                pixel_bins.push_back(curr_bin);
+                            }
+                        }
+
+                        normal_image.at<cv::Vec3f>(i,j) = normal;
+                        //std::cout << normal[0]<< ", "<<normal[1]<<", "<<normal[2]<< std::endl;
+                        //_rgb_im.at<int>(i,j)= 0;
+
 
                     }
                 }
@@ -173,14 +275,114 @@ void ImageSeg::findNormals()
         }
     }
 
+
+    /*
+    for (int i =0 ; i < pixel_bins[1].size(); i++)
+    {
+        plane.at<int>(pixel_bins[0][i].first, pixel_bins[0][i].second) = 255;
+        _rgb_im.at<int>(pixel_bins[0][i].first, pixel_bins[0][i].second) = 255;
+    }
+    for(int i = 0; i < pixel_bins.size();i++)
+    {
+        std::cout << pixel_bins[i].size()<< std::endl;
+    }
+    std::cout<< pixel_bins.size()<<std::endl;
+    */
+    showImage(plane);;
+
+}
+
+
+void ImageSeg::addVertex(Graph& g, int i, int j)
+{
+    Vertex v ;
+    v = boost::add_vertex(g);
+    g[v].i = i;
+    g[v].j = j;
+}
+
+
+void ImageSeg::addEdge(Graph& g, Vertex& v1, Vertex& v2, float w)
+{
+    Edge e = (boost::add_edge(v1,v2,g)).first;
+    g[e].w = w;
+}
+
+
+void ImageSeg::minCutSegmentation()
+{
+    /* Algorithm
+        1. create graph
+
+    */
+
+    cv::Mat_<int> dissimilar = cv::Mat::zeros(_rows,_cols, CV_16UC1);
+
+    for(int i =0; i < _rows;i++)
+    {
+        for (int j = 0; j <_cols;j++)
+        {
+            addVertex(_g, i,j);
+        }
+    }
+
+    // create edges
+    Graph::vertex_iterator vertex_It,vertex_End, tmp_it;
+    boost::tie(vertex_It, vertex_End) = boost::vertices(_g);
+    for(;vertex_It!=vertex_End;++vertex_It)
+    {
+        Vertex v1 = *vertex_It;
+        int x =  _g[v1].i;
+        int y = _g[v1].j;
+
+        for(int i = 1;  i < 5; i++ )
+        {
+            Vertex v2 = *(vertex_It+i);
+            if(*(vertex_It+i))
+            {
+
+                int x1 = _g[v2].i;
+                int y1 = _g[v2].j;
+                int val1 = _rgb_im.at<int>(x,y);
+                int val2 = _rgb_im.at<int>(x1,y1);
+                float d1 = _depth_im.at<float>(x,y);
+                float d2 = _depth_im.at<float>(x1,y1);
+                if(is_nan(d1) && is_nan(d2))
+                {
+                    float dist = (float) std::abs(val1-val2);
+                    dissimilar.at<int>(x1,y1) =(int) 255.0f*dist;
+                    addEdge(_g,v1, v2, dist);
+                    continue;
+                }
+                float dist = std::abs(val1 - val2) + std::abs(d1-d2);
+                dissimilar.at<int>(x1,y1) =(int) 255.0f*dist;
+                addEdge(_g,v1, v2, dist);
+            }
+        }
+
+
+    }
+
+    std::vector<boost::default_color_type> color(boost::num_vertices(_g));
+    std::vector<long> distance(boost::num_vertices(_g));
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, boost::num_vertices(_g)-1);
+    boost::tie(vertex_It, vertex_End) = boost::vertices(_g);
+
+    //long flow = boost::boykov_kolmogorov_max_flow(_g ,*vertex_It, *(vertex_It+5));
+
+    showImage(dissimilar);
+
 }
 
 
 int main(int argc, char *argv[]) {
     /* code */
     ImageSeg segment_img;
-    segment_img.readDepth(argv[1]);
+    segment_img.readDepth("../dataset/depth_00004.pgm");
     segment_img.readRgb("../dataset/image_00004.jpg");
-    segment_img.findNormals();
+    //segment_img.findNormals();
+    segment_img.minCutSegmentation();
     return 0;
 }
