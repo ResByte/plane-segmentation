@@ -213,7 +213,7 @@ void ImageSeg::findNormals()
                 if(!is_nan(d1) && !is_nan(d2) && !is_nan(d3) && !is_nan(d4))
                 {
                     //std::cout << d1<< ", "<<d2<<", "<<d3<<", "<<d4 << std::endl;
-                    if (abs(d1-d3) < 0.01 &&  abs(d2-d4) < 0.01)
+                    if (std::abs(d1-d3) < 0.01 &&  std::abs(d2-d4) < 0.01)
                     {
                         //std::cout << d1<< ", "<<d2<<", "<<d3<<", "<<d4 << std::endl;
                         cv::Vec3f a; // d1-d3
