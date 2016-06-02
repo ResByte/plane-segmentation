@@ -120,6 +120,7 @@ public:
 
     void addEdge(Graph& g,Vertex& v1, Vertex& v2, float w);
 
+    void watershedSeg();
 
 
 private:
@@ -160,10 +161,13 @@ void ImageSeg::showImage(cv::Mat& im)
 void ImageSeg::readRgb(std::string filename)
 {
     cv::Mat rgb = readImage(filename);
-    cv::cvtColor(rgb,rgb,CV_BGR2GRAY);
+    //cv::cvtColor(rgb,rgb,CV_BGR2GRAY);
     rgb.copyTo(_rgb_im);
     _rows = _rgb_im.rows;
     _cols = _rgb_im.cols;
+
+
+    
 
     std::cout<< _cols << ", "<< _rows<<std::endl;
 }
@@ -377,12 +381,86 @@ void ImageSeg::minCutSegmentation()
 }
 
 
+void ImageSeg::watershedSeg()
+{
+    // filter using laplacian kernel
+    cv::Mat kernel = (cv::Mat_<float>(3,3) <<
+        0.1, 0.1, 0.1,
+        0.1, -0.8, 0.1,
+        0.1, 0.1, 0.1);
+
+    cv::Mat src = _rgb_im;
+    cv::cvtColor(_rgb_im,_rgb_im,CV_BGR2GRAY);
+    cv::Mat sharp = _rgb_im;
+    cv::Mat laplacianImg;
+    cv::filter2D(sharp, laplacianImg, CV_8UC1, kernel);
+
+    _rgb_im.convertTo(sharp, CV_8U);
+    cv::Mat resultImg = sharp - laplacianImg;
+    
+    cv::threshold(resultImg, resultImg, 40, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+    
+    cv::Mat dist;
+    cv::distanceTransform(resultImg, dist, CV_DIST_L2,3);
+    cv::normalize(dist, dist, 0, 1., cv::NORM_MINMAX);
+    cv::threshold(dist, dist, .2, 1., CV_THRESH_BINARY);
+
+    cv::Mat kernel1 = cv::Mat::ones(3, 3, CV_8UC1);
+    cv::dilate(dist, dist, kernel1);
+
+    cv::Mat dist_8u;
+    dist.convertTo(dist_8u, CV_8U);
+
+    std::vector<std::vector<cv::Point> > contours;
+    cv::findContours(dist_8u, contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE);
+
+    cv::Mat markers = cv::Mat::zeros(dist.size(), CV_32SC1);
+
+    for (size_t i = 0; i < contours.size(); i++)
+        cv::drawContours(markers, contours, static_cast<int>(i), cv::Scalar::all(static_cast<int>(i)+1), -1);
+
+    cv::circle(markers, cv::Point(5,5), 3, CV_RGB(255,255,255), -1);
+    markers = markers*10000;
+
+    cv::watershed(src, markers);
+    cv::Mat mark = cv::Mat::zeros(markers.size(), CV_8UC1);
+    markers.convertTo(mark, CV_8UC1);
+    cv::bitwise_not(mark, mark);
+
+    std::vector<cv::Vec3b> colors;
+    for (size_t i = 0; i < contours.size(); i++)
+    {
+        int b = cv::theRNG().uniform(0, 255);
+        int g = cv::theRNG().uniform(0, 255);
+        int r = cv::theRNG().uniform(0, 255);
+        colors.push_back(cv::Vec3b((uchar)b, (uchar)g, (uchar)r));
+    }
+
+    cv::Mat dst = cv::Mat::zeros(markers.size(), CV_8UC3);
+
+    for (int i = 0; i < markers.rows; i++)
+    {
+        for (int j = 0; j < markers.cols; j++)
+        {
+            int index = markers.at<int>(i,j);
+            if (index > 0 && index <= static_cast<int>(contours.size()))
+                dst.at<cv::Vec3b>(i,j) = colors[index-1];
+            else
+                dst.at<cv::Vec3b>(i,j) = cv::Vec3b(0,0,0);
+        }
+    }
+
+    showImage(markers);
+}
+
+
 int main(int argc, char *argv[]) {
     /* code */
     ImageSeg segment_img;
     segment_img.readDepth("../dataset/depth_00004.pgm");
-    segment_img.readRgb("../dataset/image_00004.jpg");
+    segment_img.readRgb("../dataset/image_00001.jpg");
     //segment_img.findNormals();
-    segment_img.minCutSegmentation();
+    //segment_img.minCutSegmentation();
+    segment_img.watershedSeg();
     return 0;
 }
